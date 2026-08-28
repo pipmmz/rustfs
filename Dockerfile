@@ -15,57 +15,116 @@
 FROM alpine:3.24.1 AS build
 
 ARG TARGETARCH
+ARG TARGETVARIANT
 ARG RELEASE=latest
 
 RUN apk add --no-cache ca-certificates curl jq unzip
+
 WORKDIR /build
 
 RUN set -eux; \
-    case "$TARGETARCH" in \
-      amd64)  ARCH_SUBSTR="x86_64-musl"  ;; \
-      arm64)  ARCH_SUBSTR="aarch64-musl" ;; \
-      *) echo "Unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    case "${TARGETARCH}/${TARGETVARIANT}" in \
+      amd64/)      ARCH_SUBSTR="x86_64-musl"  ;; \
+      arm64/)      ARCH_SUBSTR="aarch64-musl" ;; \
+      arm/v7)      ARCH_SUBSTR="armv7l-musl" ;; \
+      *) \
+        echo "Unsupported TARGETARCH=${TARGETARCH} TARGETVARIANT=${TARGETVARIANT}" >&2; \
+        exit 1 \
+        ;; \
     esac; \
+    \
     if [ "$RELEASE" = "latest" ]; then \
       RELEASE_JSON="$(curl -fsSL https://api.github.com/repos/rustfs/rustfs/releases | jq -c '.[0]')"; \
       TAG="$(printf '%s' "$RELEASE_JSON" | jq -r '.tag_name // empty')"; \
     else \
       TAG="$RELEASE"; \
       RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/rustfs/rustfs/releases/tags/$TAG" 2>/dev/null || true)"; \
+      \
       if [ -z "$RELEASE_JSON" ]; then \
         if [ "${TAG#v}" = "$TAG" ]; then \
           ALT_TAG="v$TAG"; \
         else \
           ALT_TAG="${TAG#v}"; \
         fi; \
+        \
         echo "Primary tag lookup failed, retrying with alternate tag: $ALT_TAG"; \
         RELEASE_JSON="$(curl -fsSL "https://api.github.com/repos/rustfs/rustfs/releases/tags/$ALT_TAG")"; \
         TAG="$ALT_TAG"; \
       fi; \
     fi; \
-    if [ -z "$TAG" ] || [ -z "$RELEASE_JSON" ]; then echo "Failed to resolve release metadata" >&2; exit 1; fi; \
-    echo "Using tag: $TAG (arch pattern: $ARCH_SUBSTR)"; \
-    ASSET_JSON="$(printf '%s' "$RELEASE_JSON" | jq -c --arg arch "$ARCH_SUBSTR" '.assets[] | select((.name | contains($arch)) and (.name | endswith(".zip"))) | {name: .name, url: .browser_download_url, digest: .digest}' | head -n 1)"; \
-    if [ -z "$ASSET_JSON" ]; then echo "Failed to locate release asset for $ARCH_SUBSTR at tag $TAG" >&2; exit 1; fi; \
+    \
+    if [ -z "$TAG" ] || [ -z "$RELEASE_JSON" ]; then \
+      echo "Failed to resolve release metadata" >&2; \
+      exit 1; \
+    fi; \
+    \
+    echo "Using tag: $TAG"; \
+    echo "Architecture pattern: $ARCH_SUBSTR"; \
+    \
+    ASSET_JSON="$( \
+      printf '%s' "$RELEASE_JSON" \
+      | jq -c \
+        --arg arch "$ARCH_SUBSTR" \
+        '.assets[]
+        | select((.name | contains($arch))
+        and (.name | endswith(".zip")))
+        | {
+            name: .name,
+            url: .browser_download_url,
+            digest: .digest
+          }' \
+      | head -n 1 \
+    )"; \
+    \
+    if [ -z "$ASSET_JSON" ]; then \
+      echo "Failed to locate release asset for $ARCH_SUBSTR at tag $TAG" >&2; \
+      echo "Available assets:"; \
+      printf '%s' "$RELEASE_JSON" | jq -r '.assets[].name'; \
+      exit 1; \
+    fi; \
+    \
     ASSET_NAME="$(printf '%s' "$ASSET_JSON" | jq -r '.name // empty')"; \
     URL="$(printf '%s' "$ASSET_JSON" | jq -r '.url // empty')"; \
     DIGEST="$(printf '%s' "$ASSET_JSON" | jq -r '.digest // empty')"; \
     SHA256="$(printf '%s' "$DIGEST" | sed 's/^sha256://')"; \
-    if [ -z "$URL" ] || [ -z "$ASSET_NAME" ]; then echo "Failed to locate release asset for $ARCH_SUBSTR at tag $TAG" >&2; exit 1; fi; \
-    if [ -z "$SHA256" ] || [ "$SHA256" = "$DIGEST" ]; then echo "Release asset $ASSET_NAME is missing a sha256 digest" >&2; exit 1; fi; \
+    \
+    if [ -z "$URL" ] || [ -z "$ASSET_NAME" ]; then \
+      echo "Failed to locate release asset for $ARCH_SUBSTR at tag $TAG" >&2; \
+      exit 1; \
+    fi; \
+    \
+    if [ -z "$SHA256" ] || [ "$SHA256" = "$DIGEST" ]; then \
+      echo "Release asset $ASSET_NAME is missing a sha256 digest" >&2; \
+      exit 1; \
+    fi; \
+    \
     echo "Downloading: $URL"; \
     curl -fL "$URL" -o rustfs.zip; \
+    \
     printf '%s  rustfs.zip\n' "$SHA256" | sha256sum -c -; \
+    \
     unzip -q rustfs.zip -d /build; \
-    # If binary is not in root directory, try to locate and move from zip to /build/rustfs
+    \
     if [ ! -x /build/rustfs ]; then \
-      BIN_PATH="$(unzip -Z -1 rustfs.zip | grep -E '(^|/)rustfs$' | head -n 1 || true)"; \
+      BIN_PATH="$( \
+        unzip -Z -1 rustfs.zip \
+        | grep -E '(^|/)rustfs$' \
+        | head -n 1 \
+        || true \
+      )"; \
+      \
       if [ -n "$BIN_PATH" ]; then \
-        mkdir -p /build/.tmp && unzip -q rustfs.zip "$BIN_PATH" -d /build/.tmp && \
+        mkdir -p /build/.tmp; \
+        unzip -q rustfs.zip "$BIN_PATH" -d /build/.tmp; \
         mv "/build/.tmp/$BIN_PATH" /build/rustfs; \
       fi; \
     fi; \
-    [ -x /build/rustfs ] || { echo "rustfs binary not found in asset" >&2; exit 1; }; \
+    \
+    [ -x /build/rustfs ] || { \
+      echo "rustfs binary not found in asset" >&2; \
+      exit 1; \
+    }; \
+    \
     chmod +x /build/rustfs; \
     rm -rf rustfs.zip /build/.tmp || true
 
@@ -88,18 +147,19 @@ LABEL name="RustFS" \
       url="https://rustfs.com" \
       license="Apache-2.0"
 
-# Upgrade base-image packages so published images pick up security fixes
-# (e.g. openssl/libssl3 CVEs) without waiting for a new Alpine point release.
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     ca-certificates \
     coreutils \
     curl \
-    tzdata \
-    && test "$(TZ=Asia/Kolkata date +%z)" = "+0530"
+    tzdata && \
+    test "$(TZ=Asia/Kolkata date +%z)" = "+0530"
 
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /etc/ssl/certs/ca-certificates.crt \
+    /etc/ssl/certs/
+
 COPY --from=build /build/rustfs /usr/bin/rustfs
+
 COPY entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /usr/bin/rustfs /entrypoint.sh
@@ -115,7 +175,7 @@ ENV RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS="*" \
     RUSTFS_OBS_LOGGER_LEVEL=warn \
     RUSTFS_OBS_LOG_DIRECTORY=/logs \
     RUSTFS_OBS_ENVIRONMENT=production
-    
+
 EXPOSE 9000 9001
 
 VOLUME ["/data"]
