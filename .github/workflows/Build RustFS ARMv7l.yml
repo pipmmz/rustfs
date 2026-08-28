@@ -31,12 +31,12 @@ jobs:
           install-test-tools: false
 
       - name: Build RustFS
+        env:
+          RUSTFLAGS: "--cfg=io_uring_skip_arch_check"
         shell: bash
         run: |
           set -eux
-
           touch rustfs/build.rs
-
           cargo zigbuild \
             --release \
             --target armv7-unknown-linux-musleabihf \
