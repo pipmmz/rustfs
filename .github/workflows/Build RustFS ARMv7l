@@ -1,0 +1,145 @@
+name: Build RustFS ARMv7l
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build ARMv7l
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: ./.github/actions/setup
+        with:
+          rust-version: stable
+          target: armv7-unknown-linux-musleabihf
+          install-cross-tools: true
+          install-test-tools: false
+
+      - name: Build RustFS
+        shell: bash
+        run: |
+          set -eux
+
+          touch rustfs/build.rs
+
+          cargo zigbuild \
+            --release \
+            --target armv7-unknown-linux-musleabihf \
+            -p rustfs \
+            --bins
+
+      - name: Check binary
+        run: |
+          file target/armv7-unknown-linux-musleabihf/release/rustfs
+          ls -lh target/armv7-unknown-linux-musleabihf/release/rustfs
+
+      - name: Prepare Docker context
+        run: |
+          mkdir -p docker-armv7
+          cp target/armv7-unknown-linux-musleabihf/release/rustfs docker-armv7/rustfs
+          cp entrypoint.sh docker-armv7/entrypoint.sh
+
+          chmod +x docker-armv7/rustfs
+          chmod +x docker-armv7/entrypoint.sh
+
+      - name: Create Dockerfile
+        run: |
+          cat > docker-armv7/Dockerfile <<'EOF'
+          FROM alpine:3.24.1
+
+          ARG RELEASE=latest
+          ARG BUILD_DATE
+          ARG VCS_REF
+
+          LABEL name="RustFS" \
+                vendor="RustFS Team" \
+                maintainer="RustFS Team <dev@rustfs.com>" \
+                version="v${RELEASE#v}" \
+                release="${RELEASE}" \
+                build-date="${BUILD_DATE}" \
+                vcs-ref="${VCS_REF}" \
+                summary="High-performance distributed object storage system compatible with S3 API" \
+                description="RustFS is a distributed object storage system written in Rust, supporting erasure coding, multi-tenant management, and observability." \
+                url="https://rustfs.com" \
+                license="Apache-2.0"
+
+          RUN apk upgrade --no-cache && \
+              apk add --no-cache \
+              ca-certificates \
+              coreutils \
+              curl \
+              tzdata && \
+              test "$(TZ=Asia/Kolkata date +%z)" = "+0530"
+
+          COPY rustfs /usr/bin/rustfs
+          COPY entrypoint.sh /entrypoint.sh
+
+          RUN chmod +x /usr/bin/rustfs /entrypoint.sh
+
+          RUN addgroup -g 10001 -S rustfs && \
+              adduser -u 10001 -G rustfs -S rustfs -D && \
+              mkdir -p /data /logs && \
+              chown -R rustfs:rustfs /data /logs && \
+              chmod 0750 /data /logs
+
+          ENV RUSTFS_CONSOLE_CORS_ALLOWED_ORIGINS="*" \
+              RUSTFS_VOLUMES="/data" \
+              RUSTFS_OBS_LOGGER_LEVEL=warn \
+              RUSTFS_OBS_LOG_DIRECTORY=/logs \
+              RUSTFS_OBS_ENVIRONMENT=production
+
+          EXPOSE 9000 9001
+
+          VOLUME ["/data"]
+
+          USER rustfs
+
+          ENTRYPOINT ["/entrypoint.sh"]
+
+          CMD ["rustfs"]
+          EOF
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and Push ARMv7l Image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker-armv7
+          file: ./docker-armv7/Dockerfile
+          platforms: linux/arm/v7
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/rustfs:armv7
+            ghcr.io/${{ github.repository_owner }}/rustfs:armv7-latest
+          build-args: |
+            RELEASE=latest
+            BUILD_DATE=${{ github.run_started_at }}
+            VCS_REF=${{ github.sha }}
